@@ -360,13 +360,6 @@ namespace IMPv2Internals
                     found_params = false;
                     base_address_candidates.clear();
                 }
-
-                ~IPDEntry()
-                {
-                    for (auto& vec: base_address_candidates)
-                        vec.clear();
-                    base_address_candidates.clear();
-                }
             };
 
             /*
