@@ -351,15 +351,6 @@ namespace IMPv2Internals
                  * num_miss_after_index
                  */
                 std::vector<std::vector<Addr>> base_address_candidates;
-
-                IPDEntry()
-                {
-                    index1 = std::nullopt;
-                    index2 = std::nullopt;
-                    recorded_misses = 0;
-                    found_params = false;
-                    base_address_candidates.clear();
-                }
             };
 
             /*
