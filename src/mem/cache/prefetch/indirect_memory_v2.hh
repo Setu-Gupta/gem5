@@ -128,12 +128,8 @@ namespace IMPv2Internals
                 std::optional<Addr> delta;
                 uint64_t confidence;
 
-                StreamTableEntry()
-                {
-                    previous_address = {};
-                    delta = {};
-                    confidence = 0;
-                }
+                StreamTableEntry(): previous_address(), delta(), confidence(0)
+                {}
             };
 
             /**
@@ -217,16 +213,11 @@ namespace IMPv2Internals
                  */
                 uint64_t hit_count;
 
-                IndirectTableEntry()
-                {
-                    enabled = false;
-                    base_address = 0;
-                    shift = 0;
-                    confidence = 0;
-                    predicted_indirect_access = {};
-                    found_match = false;
-                    hit_count = 0;
-                }
+                IndirectTableEntry(): enabled(false), base_address(0),
+                                      shift(0), confidence(0),
+                                      predicted_indirect_access(),
+                                      found_match(false), hit_count(0)
+                {}
             };
 
             /**
