@@ -57,7 +57,8 @@ from common import SimpleOpts
 thispath = os.path.dirname(os.path.realpath(__file__))
 default_binary = os.path.join(
     thispath,
-    "../../../",
+#    "../../../",
+    "../",
     "tests/test-progs/hello/bin/x86/linux/hello",
 )
 
@@ -82,7 +83,8 @@ system.mem_ranges = [AddrRange("512MiB")]  # Create an address range
 # Create a simple CPU
 system.cpu = X86O3CPU()
 # system.cpu.branchPred.conditionalBranchPred = TournamentBP()
-system.cpu.branchPred.conditionalBranchPred = TAGE_SC_L_64KB_v2()
+# system.cpu.branchPred.conditionalBranchPred = TAGE_SC_L_64KB_v2()
+system.cpu.branchPred.conditionalBranchPred = New_TAGE()
 # system.cpu.branchPred.conditionalBranchPred = TAGE_SC_L()
 
 # Create an L1 instruction and data cache
