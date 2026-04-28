@@ -55,75 +55,117 @@
 #include <map>
 #include <iostream>
 #include <utility>
+#include <vector>
 
 namespace gem5
 {
 
         namespace branch_prediction
         {
-                class New_TAGE : public ConditionalPredictor
+		class New_TAGE : public ConditionalPredictor
                 {
                         private:
                                 static constexpr std::size_t global_history_length = 1024;
                                 std::bitset<global_history_length> global_branch_history;
 
-                                template<std::size_t counter_width>
+                                //template<std::size_t counter_width>
                                 struct TAGE_Entry
                                 {
                                         bool allocated = false;
                                         std::size_t tag;
-                                        GenericSatCounter<int8_t> counter{counter_width};
-                                        const std::size_t max_counter_value = (1ULL << counter_width);
+                                        GenericSatCounter<int8_t> counter;
                                         bool useful;
+					
+					TAGE_Entry(): counter(4){}
+				
+					bool predict() const { return counter >= (1 << 3);}
+					bool isWeak() const { return (counter == (1 << 3) || counter == ((1 << 3) - 1));}
                                 };
+				struct TAGEHistory{
+					std::bitset<global_history_length> global_history;
+					int provider;
+					int alt_provider;
+					bool provider_prediction;
+					bool alt_prediction;
+					bool prediction;
+					bool provider_was_weak;
+					bool hit_tagged_table;
+	
+					TAGEHistory()
+						: global_history(0)
+						, provider(-1)
+						, alt_provider(-1)
+						, provider_prediction(false)
+						, alt_prediction(false)
+						, prediction(false)
+						, provider_was_weak(false)
+						, hit_tagged_table(false)
+					{};
+				};
+				
+				class TAGE_Table
+				{
+    					private:
+        					unsigned logNumSets;
+        					unsigned numSets;
+        					unsigned assoc;
+        					unsigned histLength;
+        					unsigned tagSize;
+	
+					        std::vector<std::vector<TAGE_Entry>> entries;
 
-                                template<std::size_t log2_num_sets, std::size_t associativity, std::size_t msb, std::size_t lsb, std::size_t tag_size>
-                                class TAGE_Table
-                                {
-                                        private:
-                                                std::array<std::array<TAGE_Entry<4>, associativity>, (1ULL << log2_num_sets)> entries;
+        					std::pair<std::size_t, std::size_t> get_tag_index(
+        					    Addr PC, const std::bitset<global_history_length>& global_history) const
+        					{	
+        						const unsigned index_size = logNumSets + tagSize;
 
-                                                std::pair<std::size_t, std::size_t> get_tag_index(Addr PC, const std::bitset<global_history_length> &global_history) const
-                                                {
-                                                        constexpr std::size_t index_size = tag_size + log2_num_sets;
-                                                        static_assert(index_size <= sizeof(std::size_t), "The table index values and tag, combined together, are limited to the size of std::size_t");
+					        	std::size_t tag_index = 0;
+            						std::size_t slice = 0;
+            						unsigned bits_extracted = 0;
 
-                                                        // Extract the relevant bits from global history and fold them over
-                                                        std::size_t tag_index = 0;
-                                                        std::size_t extracted_slice = 0;
-                                                        std::size_t num_bits_extracted = 0;
-                                                        for(std::size_t i = lsb; i <= msb; i++)
-                                                        {
-                                                                extracted_slice << 1;
-                                                                if(global_history[i])
-                                                                        extracted_slice ^= 1ULL;
-                                                                else
-                                                                        extracted_slice ^= 0ULL;
-                                                                num_bits_extracted++;
-                                                                if(num_bits_extracted == index_size)
-                                                                {
-                                                                        tag_index ^= extracted_slice;
-                                                                        extracted_slice = 0ULL;
-                                                                        num_bits_extracted = 0;
-                                                                }
-                                                        }
+            						for (unsigned i = 0; i < histLength; i++)
+            						{
+                						slice <<= 1;
+                						slice |= global_history[i] ? 1ULL : 0ULL;
+                						bits_extracted++;
 
-                                                        while(PC != 0)
-                                                        {
-                                                                tag_index ^= PC & ((1ULL << index_size) - 1);
-                                                                PC >> index_size;
-                                                        }
+                						if (bits_extracted == index_size)
+                						{
+                							tag_index ^= slice;
+                							slice = 0;
+                    							bits_extracted = 0;
+                						}
+            						}
+            						if (bits_extracted > 0)
+                						tag_index ^= slice;
 
-                                                        const std::size_t index_mask = ((1ULL << log2_num_sets) - 1ULL);
-                                                        const std::size_t index = tag_index & index_mask;
-                                                        const std::size_t tag_mask = ~((1ULL << log2_num_sets) - 1ULL);
-                                                        const std::size_t tag = (tag_index & ~index_mask) >> log2_num_sets;
+            						Addr pc = PC;
+            						while (pc != 0)
+            						{
+                						tag_index ^= pc & ((1ULL << index_size) - 1);
+                						pc >>= index_size;
+            						}
 
-                                                        return {tag, index};
-                                                }
+            						std::size_t index = tag_index & ((1ULL << logNumSets) - 1);
+            						std::size_t tag = (tag_index >> logNumSets) & ((1ULL << tagSize) - 1);
+            						return {tag, index};
+        					}
 
-                                        public:
-                                                bool hit(Addr PC, std::bitset<1024> global_history) const
+    					public:
+        					TAGE_Table() = default;
+
+        					TAGE_Table(unsigned _logNumSets, unsigned _assoc,
+                   					unsigned _histLength, unsigned _tagSize)
+            						: logNumSets(_logNumSets)
+            						, numSets(1ULL << _logNumSets)
+            						, assoc(_assoc)
+            						, histLength(_histLength)
+            						, tagSize(_tagSize)
+            						, entries(1ULL << _logNumSets,
+                      					std::vector<TAGE_Entry>(_assoc))
+						{}	
+
+                                                bool hit(Addr PC, const std::bitset<1024>& global_history) const
                                                 {
                                                         const auto [tag, index] = get_tag_index(PC, global_history);
                                                         const auto& set = entries.at(index);
@@ -135,31 +177,144 @@ namespace gem5
                                                         return false;
                                                 }
 
-                                                bool predict(Addr PC, std::bitset<1024> global_history) const
+                                                bool predict(Addr PC, const std::bitset<1024>& global_history) const
                                                 {
                                                         const auto [tag, index] = get_tag_index(PC, global_history);
                                                         const auto& set = entries.at(index);
                                                         for(const auto& entry: set)
                                                         {
                                                                 if(entry.allocated && (entry.tag == tag))
-                                                                        return entry.counter >= (entry.max_counter_value >> 1);
+                                                                        return entry.predict();
                                                         }
-                                                        assert(false);
+                                                        assert(false && "predict() called without hit");
+							return false;
                                                 }
-                                };
-                        public:
-                                New_TAGE(const New_TAGEParams &params);
-                                bool lookup(ThreadID tid, Addr PC, void * &bp_history) override;
-                                void updateHistories(ThreadID tid, Addr PC, bool uncond, bool taken,
-                                                Addr target, const StaticInstPtr &inst,
-                                                void * &bp_history) override;
-                                void squash(ThreadID tid, void * &bp_history) override;
-                                void update(ThreadID tid, Addr PC, bool taken,
-                                                void * &bp_history, bool squashed,
-                                                const StaticInstPtr & inst, Addr target) override;
-                };
+	
+						bool isWeak(Addr PC, const std::bitset<global_history_length>& gh) const
+						{
+							const auto [tag, index] = get_tag_index(PC, gh);
+							const auto& set = entries.at(index);
+							for (const auto& entry : set)
+							{
+								if (entry.allocated && entry.tag == tag)
+									return entry.isWeak();
+							}
+							assert(false && "isWeak() called without hit");
+							return false;
+						}
+						
+						void updateCounter(Addr PC,
+							const std::bitset<global_history_length>& gh, bool taken)
+						{
+							const auto [tag, index] = get_tag_index(PC, gh);
+							auto& set = entries.at(index);
+							for (auto& entry : set)
+							{
+								if (entry.allocated && entry.tag == tag)
+        							{
+            								if (taken)
+                								entry.counter++;
+            								else
+            									entry.counter--;
+								return;
+								}
+							}
+						}
 
-        } // namespace branch_prediction
+						// ============================================
+						// Set or clear the useful bit for a matching entry
+						// ============================================
+						void setUseful(Addr PC, const std::bitset<global_history_length>& gh, bool val)
+						{
+							const auto [tag, index] = get_tag_index(PC, gh);
+							auto& set = entries.at(index);
+							for (auto& entry : set)
+							{
+								if (entry.allocated && entry.tag == tag)
+								{
+									entry.useful = val;
+									return;
+								}
+							}
+						}
+
+						// ============================================
+						// Try to allocate a new entry
+						// Returns true if allocation succeeded
+						// ============================================
+						bool allocate(Addr PC,
+								const std::bitset<global_history_length>& gh, bool taken)
+						{
+							const auto [tag, index] = get_tag_index(PC, gh);
+							auto& set = entries.at(index);
+
+							// First: look for an unallocated slot
+							for (auto& entry : set)
+							{
+								if (!entry.allocated)
+								{
+									entry.allocated = true;
+									entry.tag = tag;
+									entry.counter.reset();
+									// Weak taken or weak not-taken
+									if (taken)
+										entry.counter++;
+									entry.useful = false;
+									return true;
+								}
+							}
+
+							// Second: look for a not-useful slot to evict
+							for (auto& entry : set)
+							{
+								if (!entry.useful)
+								{
+									entry.allocated = true;
+									entry.tag = tag;
+									entry.counter.reset();
+									if (taken)
+										entry.counter++;
+									entry.useful = false;
+									return true;
+								}
+							}
+
+							// All entries are useful — allocation fails
+							return false;
+						}
+
+						// ============================================
+						// Age (clear) useful bits in the indexed set
+						// Called when allocation fails, to make room
+						// for future allocations
+						// ============================================
+						void decrementUseful(Addr PC,
+								const std::bitset<global_history_length>& gh)
+						{
+							const auto [tag, index] = get_tag_index(PC, gh);
+							auto& set = entries.at(index);
+							for (auto& entry : set)
+							{
+								entry.useful = false;
+							}
+						}
+				};
+				unsigned nHistoryTables;
+				std::vector<TAGE_Table> tables;
+				std::vector<GenericSatCounter<int8_t>> basePredictor;
+				unsigned logBaseSize;
+			public:
+				New_TAGE(const New_TAGEParams &params);
+				bool lookup(ThreadID tid, Addr PC, void * &bp_history) override;
+				void updateHistories(ThreadID tid, Addr PC, bool uncond, bool taken,
+						Addr target, const StaticInstPtr &inst,
+						void * &bp_history) override;
+				void squash(ThreadID tid, void * &bp_history) override;
+				void update(ThreadID tid, Addr PC, bool taken,
+						void * &bp_history, bool squashed,
+						const StaticInstPtr & inst, Addr target) override;
+		}; // class New_Tage
+	} // namespace branch_prediction
 } // namespace gem5
 
 #endif //  __CPU_PRED_BI_MODE_PRED_HH__

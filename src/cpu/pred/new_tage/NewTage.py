@@ -52,3 +52,7 @@ class New_TAGE(ConditionalPredictor):
     globalCtrBits = Param.Unsigned(2, "Bits per counter")
     choicePredictorSize = Param.Unsigned(8192, "Size of choice predictor")
     choiceCtrBits = Param.Unsigned(2, "Bits of choice counters")
+    
+    nHistoryTables = Param.Unsigned(6, "Number of history tables")
+    minHist = Param.Unsigned(5, "Minimum history size of TAGE")
+    maxHist = Param.Unsigned(640, "Maximum history size of TAGE")

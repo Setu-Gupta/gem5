@@ -44,41 +44,237 @@
 
 #include "cpu/pred/new_tage/new_tage.hh"
 #include <iostream>
+#include <cmath>
 
 namespace gem5
 {
 
-        namespace branch_prediction
-        {
-                New_TAGE::New_TAGE(const New_TAGEParams &params)
-                        : ConditionalPredictor(params)
-                {
-                        std::cout << "Initializing TAGE" << '\n';
-                }
+	namespace branch_prediction
+	{
+		New_TAGE::New_TAGE(const New_TAGEParams &params)
+			: ConditionalPredictor(params)
+			  , nHistoryTables(params.nHistoryTables)
+			  , logBaseSize(14) // 16K-entry base predictor
+		{
+			std::cout << "Initializing TAGE" << '\n';
+			global_branch_history.reset();
 
-                bool New_TAGE::lookup(ThreadID tid, Addr PC, void * &bp_history)
-                {
-                        std::cout << "Predicting branch at " << PC << '\n';
-                        return false;
-                }
+			//tables.reserve(nHistoryTables);
+			basePredictor.resize(1ULL << logBaseSize, GenericSatCounter<int8_t>(2));
+			unsigned minHist = params.minHist;
+			unsigned maxHist = params.maxHist;
 
-                void New_TAGE::updateHistories(ThreadID tid, Addr PC, bool uncond, bool taken,
-                                Addr target, const StaticInstPtr &inst,
-                                void * &bp_history)
-                {
-                        std::cout << "Updating history for " << PC << '\n';
-                }
+			// tables get history lengths: 5, 13, 32, 80, 200, 640
+			for (unsigned i=0; i < nHistoryTables; i++){
+				double exponent = (double)i / (double)(nHistoryTables - 1);
+				unsigned histLength = (unsigned) (minHist * pow((double)maxHist / minHist, exponent) + 0.5);
 
-                void New_TAGE::squash(ThreadID tid, void * &bp_history)
-                {
-                        std::cout << "Squashing\n";
-                }
+				unsigned logNumSets = 10;   // 1024 sets per table
+				unsigned assoc = 4;         // 4-way
+				unsigned tagSize = 10;      // 10-bit tags
 
-                void New_TAGE::update(ThreadID tid, Addr PC, bool taken, void * &bp_history,
-                                bool squashed, const StaticInstPtr & inst, Addr target)
-                {
-                        std::cout << "Updating for " << PC << '\n';
-                }
+				tables.emplace_back(logNumSets, assoc, histLength, tagSize); 
+			}
+		}
 
-        } // namespace branch_prediction
+		bool New_TAGE::lookup(ThreadID tid, Addr PC, void * &bp_history)
+		{
+			TAGEHistory *history = new TAGEHistory();
+			history->global_history = global_branch_history;
+			// base prediction
+			std::size_t baseIndex = PC & ((1ULL << logBaseSize) - 1);
+			bool basePrediction = basePredictor[baseIndex] >= 2;
+
+			history->provider = -1;
+			history->alt_provider = -1;
+
+
+			for (int i = nHistoryTables - 1; i >= 0; i--){
+				if (tables[i].hit(PC, global_branch_history)){
+					if (history->provider == -1)
+						history->provider = i;
+					else if (history->alt_provider == -1){
+						history->alt_provider = i;
+						break;
+					}
+				}
+			}
+
+			if (history->alt_provider >= 0)
+				history->alt_prediction = tables[history->alt_provider].predict(PC, global_branch_history);
+			else
+				history->alt_prediction = basePrediction;
+
+			if (history->provider >= 0) {
+				history->hit_tagged_table = true;
+				history->provider_prediction = tables[history->provider].predict(PC, global_branch_history);
+				history->provider_was_weak = tables[history->provider].isWeak(PC, global_branch_history);
+
+				if (history->provider_was_weak) 
+					history->prediction = history->alt_prediction;
+				else
+					history->prediction = history->provider_prediction;
+			}
+			else {
+				history->hit_tagged_table = false;
+				history->provider_prediction = basePrediction;
+				history->prediction = basePrediction;
+			}
+			bp_history = static_cast<void*>(history);
+			return history->prediction;
+		}
+
+		void New_TAGE::updateHistories(ThreadID tid, Addr PC, bool uncond, bool taken,
+				Addr target, const StaticInstPtr &inst,
+				void * &bp_history)
+		{
+			std::cout << "Updating history for " << PC << '\n';
+			// If this is an unconditional branch, lookup() was never called,
+			// so bp_history is nullptr. We still need to save history
+			// for potential squash recovery.
+			if (bp_history == nullptr)
+			{
+				TAGEHistory *history = new TAGEHistory();
+				history->global_history = global_branch_history;
+				history->provider = -1;
+				history->alt_provider = -1;
+				history->prediction = true;  // unconditional = always taken
+				bp_history = static_cast<void*>(history);
+			}
+
+			// Shift global history left by 1
+			global_branch_history <<= 1;
+			// Push the branch outcome into bit 0
+			if (uncond){
+				// Unconditional branches are always taken
+				global_branch_history[0] = 1;
+			}
+			else{
+				// Conditional: use the predicted direction
+				// (this is speculative — may be wrong)
+				global_branch_history[0] = taken;
+			}
+		}
+
+		void New_TAGE::squash(ThreadID tid, void * &bp_history)
+		{
+			TAGEHistory *history = static_cast<TAGEHistory*>(bp_history);
+			global_branch_history = history->global_history;
+			delete history;
+			bp_history = nullptr;
+		}
+
+		void New_TAGE::update(ThreadID tid, Addr PC, bool taken,
+				void * &bp_history, bool squashed,
+				const StaticInstPtr &inst, Addr target)
+		{
+			TAGEHistory *history = static_cast<TAGEHistory*>(bp_history);
+
+			// If this branch was on a squashed (wrong) path, don't train
+			if (squashed)
+			{
+				delete history;
+				bp_history = nullptr;
+				return;
+			}
+
+			// Use the history snapshot from prediction time
+			// (current global_branch_history has been speculatively updated)
+			const auto& gh = history->global_history;
+
+			// ============================================
+			// 1. Update base predictor (always)
+			// ============================================
+			std::size_t baseIndex = PC & ((1ULL << logBaseSize) - 1);
+			if (taken)
+				basePredictor[baseIndex]++;
+			else
+				basePredictor[baseIndex]--;
+
+			// ============================================
+			// 2. Update provider counter
+			// ============================================
+			if (history->provider >= 0)
+			{
+				tables[history->provider].updateCounter(PC, gh, taken);
+			}
+
+			// ============================================
+			// 3. Update alt provider counter
+			//    (only if provider was weak, since we
+			//     used alt prediction in that case)
+			// ============================================
+			if (history->provider_was_weak && history->alt_provider >= 0)
+			{
+				tables[history->alt_provider].updateCounter(PC, gh, taken);
+			}
+
+			// ============================================
+			// 4. Manage useful bits
+			//    If provider and alt gave DIFFERENT predictions:
+			//      - Provider correct → mark useful
+			//      - Provider wrong   → mark not useful
+			// ============================================
+			if (history->provider >= 0)
+			{
+				if (history->provider_prediction != history->alt_prediction)
+				{
+					if (history->provider_prediction == taken)
+					{
+						// Provider was right, alt was wrong → useful
+						tables[history->provider].setUseful(PC, gh, true);
+					}
+					else
+					{
+						// Provider was wrong, alt was right → not useful
+						tables[history->provider].setUseful(PC, gh, false);
+					}
+				}
+			}
+
+			// ============================================
+			// 5. On misprediction: allocate in a table
+			//    with LONGER history than the provider
+			// ============================================
+			bool mispredicted = (history->prediction != taken);
+
+			if (mispredicted)
+			{
+				// Start searching from the table above the provider
+				int startTable = history->provider + 1;
+
+				// If no tagged table was hit, start from table 0
+				if (history->provider == -1)
+					startTable = 0;
+
+				bool allocated = false;
+
+				// Try to allocate in ONE longer-history table
+				for (unsigned i = startTable; i < nHistoryTables; i++)
+				{
+					if (tables[i].allocate(PC, gh, taken))
+					{
+						allocated = true;
+						break;
+					}
+				}
+
+				// If allocation failed everywhere, age useful bits
+				// to make room for future allocations
+				if (!allocated)
+				{
+					for (unsigned i = startTable; i < nHistoryTables; i++)
+					{
+						tables[i].decrementUseful(PC, gh);
+					}
+				}
+			}
+
+			// ============================================
+			// 6. Cleanup
+			// ============================================
+			delete history;
+			bp_history = nullptr;
+		}
+	} // namespace branch_prediction
 } // namespace gem5
