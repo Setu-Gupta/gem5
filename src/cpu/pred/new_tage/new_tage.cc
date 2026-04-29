@@ -75,10 +75,12 @@ namespace gem5
 
 				tables.emplace_back(logNumSets, assoc, histLength, tagSize); 
 			}
+			std::cout << "Done initializing TAGE" << '\n';
 		}
 
 		bool New_TAGE::lookup(ThreadID tid, Addr PC, void * &bp_history)
 		{
+			//std::cout << "lookup: Start" << '\n';
 			TAGEHistory *history = new TAGEHistory();
 			history->global_history = global_branch_history;
 			// base prediction
@@ -88,6 +90,7 @@ namespace gem5
 			history->provider = -1;
 			history->alt_provider = -1;
 
+			//std::cout << "lookup: finding provider & alt" << '\n';
 
 			for (int i = nHistoryTables - 1; i >= 0; i--){
 				if (tables[i].hit(PC, global_branch_history)){
@@ -121,6 +124,7 @@ namespace gem5
 				history->prediction = basePrediction;
 			}
 			bp_history = static_cast<void*>(history);
+			//std::cout << "lookup: returning" << '\n';
 			return history->prediction;
 		}
 
@@ -128,7 +132,7 @@ namespace gem5
 				Addr target, const StaticInstPtr &inst,
 				void * &bp_history)
 		{
-			std::cout << "Updating history for " << PC << '\n';
+			//std::cout << "Updating history for " << PC << '\n';
 			// If this is an unconditional branch, lookup() was never called,
 			// so bp_history is nullptr. We still need to save history
 			// for potential squash recovery.
@@ -154,22 +158,30 @@ namespace gem5
 				// (this is speculative — may be wrong)
 				global_branch_history[0] = taken;
 			}
+			//std::cout << "updateHist: finished" << '\n';
 		}
 
 		void New_TAGE::squash(ThreadID tid, void * &bp_history)
 		{
+			//std::cout << "squash: start" << '\n';
+			if (bp_history == nullptr)
+                                return;
 			TAGEHistory *history = static_cast<TAGEHistory*>(bp_history);
 			global_branch_history = history->global_history;
 			delete history;
 			bp_history = nullptr;
+			//std::cout << "squash: finished" << '\n';
 		}
 
 		void New_TAGE::update(ThreadID tid, Addr PC, bool taken,
 				void * &bp_history, bool squashed,
 				const StaticInstPtr &inst, Addr target)
 		{
+			//std::cout << "update: start" << '\n';
+			if (bp_history == nullptr)
+				return;
 			TAGEHistory *history = static_cast<TAGEHistory*>(bp_history);
-
+			
 			// If this branch was on a squashed (wrong) path, don't train
 			if (squashed)
 			{
@@ -208,7 +220,7 @@ namespace gem5
 			{
 				tables[history->alt_provider].updateCounter(PC, gh, taken);
 			}
-
+			//std::cout << "update: step3 done" << '\n';
 			// ============================================
 			// 4. Manage useful bits
 			//    If provider and alt gave DIFFERENT predictions:
@@ -238,6 +250,7 @@ namespace gem5
 			// ============================================
 			bool mispredicted = (history->prediction != taken);
 
+			//std::cout << "update: step4 done" << '\n';
 			if (mispredicted)
 			{
 				// Start searching from the table above the provider
@@ -275,6 +288,7 @@ namespace gem5
 			// ============================================
 			delete history;
 			bp_history = nullptr;
+			//std::cout << "update: done" << '\n';
 		}
 	} // namespace branch_prediction
 } // namespace gem5
